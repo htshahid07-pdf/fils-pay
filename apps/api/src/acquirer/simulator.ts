@@ -165,7 +165,13 @@ export function createAcquirerSimulator(config: SimulatorConfig): AcquirerSimula
         acquirerReference: req.acquirerReference,
         latencyMs,
       };
-      refundCache.set(req.idempotencyKey, result);
+      // Only a definitive answer (approved / declined) is remembered. An
+      // "error" means the acquirer never acted, so a retry with the same key
+      // (processRefund keys on the merchant's Idempotency-Key) must reach the
+      // acquirer again instead of replaying the outage forever.
+      if (result.outcome !== "error") {
+        refundCache.set(req.idempotencyKey, result);
+      }
       return result;
     },
   };

@@ -150,12 +150,22 @@ func main() {
 			if err != nil {
 				log.Fatalf("settlement rebuild-balances: invalid --merchant: %v", err)
 			}
-			// am: --merchant writes the cache for that one merchant, same as the full rebuild
-			before, err := ledger.RebuildMerchantBalance(ctx, pool, id)
+			// RebuildMerchantBalance only computes the ledger figure; write it
+			// to the cache too, as the full rebuild does (it used to print the
+			// number and leave merchant_balances untouched).
+			rebuilt, err := ledger.RebuildMerchantBalance(ctx, pool, id)
 			if err != nil {
 				log.Fatalf("settlement rebuild-balances: %v", err)
 			}
-			fmt.Printf("rebuild-balances: merchant=%s rebuilt=%d\n", id, before)
+			if _, err := pool.Exec(ctx, `
+				INSERT INTO merchant_balances (merchant_id, cached_payable_fils, updated_at)
+				VALUES ($1, $2, now())
+				ON CONFLICT (merchant_id) DO UPDATE
+				  SET cached_payable_fils = $2, updated_at = now()
+			`, id, int64(rebuilt)); err != nil {
+				log.Fatalf("settlement rebuild-balances: write cache for %s: %v", id, err)
+			}
+			fmt.Printf("rebuild-balances: merchant=%s rebuilt=%d\n", id, rebuilt)
 			return
 		}
 

@@ -1,0 +1,14 @@
+-- Incident 2026-05-14: "A slow payment let a second buyer use the same link
+-- before the first one finished. Both were charged."
+--
+-- A pay attempt reserves a link (status = 'reserved', reserved_at = now()).
+-- A reservation older than the timeout may be re-claimed (crash recovery).
+-- But the first attempt was not dead, only slow: buyer B re-claimed the link,
+-- both attempts authorized and captured, and nothing told buyer A's request
+-- that it had lost its reservation — every check was "status = 'reserved'",
+-- which is true for B's reservation too.
+--
+-- reservation_id identifies ONE claim. Every later step of a pay attempt
+-- (pre-capture check, release, finalize) is keyed on it, so a request whose
+-- reservation was taken over can tell, and stops before capturing.
+ALTER TABLE payment_links ADD COLUMN reservation_id UUID;

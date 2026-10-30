@@ -9,6 +9,9 @@ export interface RotatedApiKey extends IssuedApiKey {
   previousKeyId: string;
 }
 
+/** How long the previous key keeps working after an admin rotation. */
+export const ROTATION_OVERLAP = "24 hours";
+
 /** Rotates a merchant's API key, atomically with its audit row. */
 export async function rotateApiKeyAsAdmin(
   pool: Pool,
@@ -27,6 +30,17 @@ export async function rotateApiKeyAsAdmin(
     if (row.revoked_at) {
       throw new ConflictError("api_key_already_revoked");
     }
+
+    // Schedule the previous key's end. Rotation used to leave it valid
+    // forever: migration 0056 added revoke_after for a staged rotation, but
+    // nothing ever set it and nothing read it (the "sweep job" in its comment
+    // was never written). A rotated — often leaked — key must stop working.
+    // The overlap lets the merchant deploy the new key; verifyApiKey enforces
+    // revoke_after directly, so no sweep job is needed.
+    await client.query(
+      `UPDATE api_keys SET revoke_after = now() + interval '${ROTATION_OVERLAP}' WHERE id = $1`,
+      [input.apiKeyId],
+    );
 
     const issued = await issueApiKeyInTx(client, config, {
       merchantId: input.merchantId,

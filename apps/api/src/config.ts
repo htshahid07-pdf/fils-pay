@@ -256,6 +256,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     webhookRequestTimeoutMs: parseIntEnv(env.WEBHOOK_REQUEST_TIMEOUT_MS, 10_000),
 
     acquirerCallbackSigningSecret,
-    acquirerCallbackRequireSignature: parseBoolEnv(env.ACQUIRER_CALLBACK_REQUIRE_SIGNATURE, false),
+    // Default ON (FP-240): an unsigned callback was accepted by default, so
+    // the endpoint had no authentication at all. Production cannot opt out.
+    acquirerCallbackRequireSignature:
+      nodeEnv === "production" ? true : parseBoolEnv(env.ACQUIRER_CALLBACK_REQUIRE_SIGNATURE, true),
   };
 }

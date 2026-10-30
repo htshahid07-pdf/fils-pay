@@ -13,7 +13,8 @@ export async function recordPayoutDisbursementEffect(
 
   await pool.query(
     `INSERT INTO settlement_payout_disbursements (settlement_batch_id, amount_fils, disbursement_reference)
-     VALUES ($1, $2, 'disb_' || gen_random_uuid())`,
+     VALUES ($1, $2, 'disb_' || gen_random_uuid())
+     ON CONFLICT DO NOTHING`,
     [settlementBatchId, amountFils],
   );
 }

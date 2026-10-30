@@ -28,7 +28,7 @@ func TestUpdateLifetimePayoutMonitoringEstimate_SmallValuesExact(t *testing.T) {
 		}
 	}
 
-	var got float32
+	var got int64 // BIGINT since migration 0073 (was REAL)
 	err = tx.QueryRow(ctx, `
 		SELECT lifetime_net_payout_monitoring_estimate FROM merchants WHERE id = $1
 	`, merchantID).Scan(&got)

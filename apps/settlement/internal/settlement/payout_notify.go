@@ -83,14 +83,25 @@ func EnqueuePayoutNotifications(ctx context.Context, db *pgxpool.Pool) (int, err
 		if err != nil {
 			return count, fmt.Errorf("settlement: EnqueuePayoutNotifications: marshal payload: %w", err)
 		}
-		_, err = db.Exec(ctx, `
+		// Claim the batch in the dedupe table and enqueue in ONE statement
+		// (incident 2026-08-21): the outbox row is only inserted if this call
+		// won the claim. A concurrent run blocks on the primary key, then
+		// gets ON CONFLICT DO NOTHING and enqueues nothing. The NOT EXISTS
+		// in the scan above is now only an optimisation.
+		tag, err := db.Exec(ctx, `
+			WITH claimed AS (
+				INSERT INTO settlement_paid_notifications (settlement_batch_id)
+				VALUES ($1)
+				ON CONFLICT (settlement_batch_id) DO NOTHING
+				RETURNING settlement_batch_id
+			)
 			INSERT INTO outbox_events (event_type, aggregate_type, aggregate_id, payload)
-			VALUES ('settlement.paid', 'settlement_batch', $1, $2)
+			SELECT 'settlement.paid', 'settlement_batch', settlement_batch_id, $2 FROM claimed
 		`, b.id, payload)
 		if err != nil {
 			return count, fmt.Errorf("settlement: EnqueuePayoutNotifications: insert batch %s: %w", b.id, err)
 		}
-		count++
+		count += int(tag.RowsAffected())
 	}
 	return count, nil
 }

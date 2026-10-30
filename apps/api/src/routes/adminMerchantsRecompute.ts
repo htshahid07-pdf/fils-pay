@@ -2,7 +2,6 @@ import type { FastifyInstance } from "fastify";
 import { requireAdminRole, requireAdminSession } from "../adminAuth/middleware.js";
 import { insertAdminAuditLog } from "../adminAudit/log.js";
 import { merchantExists, UUID_RE } from "../admin/merchants.js";
-import { reconcileSandboxFlag } from "../admin/merchantFlags.js";
 import { recomputeTransactionStatusesForMerchant } from "../admin/transactionStatusRecompute.js";
 import { withTransaction } from "../db/withTransaction.js";
 import { NotFoundError, UnauthorizedError } from "../lib/errors.js";
@@ -25,7 +24,15 @@ export async function adminMerchantsRecomputeRoutes(app: FastifyInstance): Promi
 
       const result = await withTransaction(app.db, async (client) => {
         const recompute = await recomputeTransactionStatusesForMerchant(client, request.params.id);
-        const flagsUpdated = await reconcileSandboxFlag(client, request.params.id, recompute);
+        // Recomputing statuses must not touch merchant flags. This used to
+        // call reconcileSandboxFlag, which silently set test_mode = false on
+        // any test merchant with no open authorizations — after which
+        // RunDailyBatch (status = 'active' AND test_mode = false) settled and
+        // paid out its test transactions for real. Leaving sandbox is a
+        // deliberate onboarding decision, not a side effect of a repair tool.
+        // flagsUpdated is kept (always empty) so the response shape the admin
+        // console reads does not change.
+        const flagsUpdated: string[] = [];
         await insertAdminAuditLog(client, {
           adminUserId: adminAuth.adminUserId,
           action: "transaction_status_recompute",

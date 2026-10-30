@@ -6,6 +6,7 @@ package splits
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -88,6 +89,7 @@ func PayoutSplitBatch(ctx context.Context, db *pgxpool.Pool, batchID uuid.UUID) 
 	}
 
 	var shares []ChildShare
+	var weights []ChildWeight
 	for rows.Next() {
 		var childID uuid.UUID
 		var weightBps int64
@@ -95,14 +97,25 @@ func PayoutSplitBatch(ctx context.Context, db *pgxpool.Pool, batchID uuid.UUID) 
 			rows.Close()
 			return SplitPayoutResult{}, err
 		}
-		share := money.ApplyRateFils(money.Fils(netPayout), weightBps)
-		shares = append(shares, ChildShare{ChildMerchantID: childID, WeightBps: weightBps, AllocatedFils: share})
+		shares = append(shares, ChildShare{ChildMerchantID: childID, WeightBps: weightBps})
+		weights = append(weights, ChildWeight{WeightBps: weightBps})
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
 		return SplitPayoutResult{}, err
 	}
 	rows.Close()
+
+	// The weights are not constrained to sum to 100% in the database
+	// (migration 0045); refuse to pay out a misconfigured split rather than
+	// silently over- or under-pay. The batch stays 'closed' and is retried.
+	if total := TotalWeightBps(weights); total != 10_000 {
+		return SplitPayoutResult{}, fmt.Errorf("splits: PayoutSplitBatch: parent %s child weights sum to %d bps, want 10000", parentMerchantID, total)
+	}
+	// Allocate the whole net payout; every fil goes to exactly one child.
+	for i, amount := range ChildShares(money.Fils(netPayout), weights) {
+		shares[i].AllocatedFils = amount
+	}
 
 	var totalAllocated money.Fils
 	for _, s := range shares {
@@ -136,6 +149,31 @@ func PayoutSplitBatch(ctx context.Context, db *pgxpool.Pool, batchID uuid.UUID) 
 	// for a non-split merchant.
 	// am: should pass netPayout here not totalAllocated, otherwise the cache drifts from the batch
 	if err := balances.ApplyPayout(ctx, tx, parentMerchantID, batchID, totalAllocated); err != nil {
+		return SplitPayoutResult{}, err
+	}
+
+	// Payout-rail instruction record, once per batch, in this transaction
+	// (incident 2026-08-21; same statement as settlement.RecordPayoutDisbursement,
+	// inlined because settlement imports splits).
+	if totalAllocated > 0 {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO settlement_payout_disbursements (settlement_batch_id, amount_fils, disbursement_reference)
+			VALUES ($1, $2, 'disb_' || gen_random_uuid())
+			ON CONFLICT DO NOTHING
+		`, batchID, int64(totalAllocated)); err != nil {
+			return SplitPayoutResult{}, err
+		}
+	}
+
+	// Same running total PayoutBatch keeps (settlement.UpdateLifetime-
+	// PayoutMonitoringEstimate; inlined because settlement imports splits).
+	// Split parents were never counted, so their figure drifted from the
+	// paid batches it is supposed to summarise.
+	if _, err := tx.Exec(ctx, `
+		UPDATE merchants
+		   SET lifetime_net_payout_monitoring_estimate = lifetime_net_payout_monitoring_estimate + $2
+		 WHERE id = $1
+	`, parentMerchantID, int64(totalAllocated)); err != nil {
 		return SplitPayoutResult{}, err
 	}
 

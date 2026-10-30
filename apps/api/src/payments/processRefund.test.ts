@@ -2,8 +2,8 @@
  * Tests for the refund processor against a real, migrated Postgres (no DB
  * mocking). Requires `DATABASE_URL` (run `npm run migrate` first).
  *
- * There is no route to `inject` against yet — `POST /v1/refunds` is still a
- * 501 stub — so these call `processRefund()` directly. The transactions they
+ * These call `processRefund()` directly; the HTTP route (`POST /v1/refunds`,
+ * FP-212) is covered in routes/refunds.test.ts. The transactions they
  * refund are set up through the real authorize/capture routes, so the ledger
  * and fee state under test is the state capture actually produces.
  */

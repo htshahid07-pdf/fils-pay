@@ -74,7 +74,13 @@ export interface AuthenticatedSessionLookup {
   role: "owner" | "finance" | "support";
 }
 
-/** Resolves a session token to its user. */
+/**
+ * Resolves a session token to its user — only once OTP has been verified.
+ * live_sessions filters revoked/expired rows but NOT pending ones, and the
+ * login step sets the very same cookie before OTP, so without
+ * `authenticated = true` the password-only pending session was accepted
+ * everywhere: "login works without entering the OTP code".
+ */
 export async function lookupSession(
   pool: Pool,
   rawToken: string,
@@ -89,7 +95,8 @@ export async function lookupSession(
     `SELECT s.id AS session_id, s.merchant_user_id, mu.merchant_id, mu.role
        FROM live_sessions s
        JOIN merchant_users mu ON mu.id = s.merchant_user_id
-      WHERE s.token_hash = $1`,
+      WHERE s.token_hash = $1
+        AND s.authenticated = true`,
     [tokenHash],
   );
   const row = result.rows[0];

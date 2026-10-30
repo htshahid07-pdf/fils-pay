@@ -14,6 +14,11 @@ import (
 
 // RefreshBalanceCache recomputes each merchant's cached balance from the
 // settled position and overwrites merchant_balances in one transaction.
+//
+// Deprecated: do not use. It sources balances from the
+// merchant_payable_position view (scheme export gross), not from
+// ledger_entries, so it disagrees with RebuildAllBalances. The admin
+// button now calls RebuildAllBalances.
 func RefreshBalanceCache(ctx context.Context, db *pgxpool.Pool) (map[uuid.UUID]RebuildDiff, error) {
 	tx, err := db.Begin(ctx)
 	if err != nil {

@@ -34,10 +34,15 @@ export async function applyAcquirerCallback(pool: Pool, callback: AcquirerCallba
     throw new NotFoundError("transaction_not_found");
   }
 
+  // Idempotent on the acquirer's callbackId (unique since migration 0075):
+  // a redelivered callback is acknowledged but not stored twice (FP-201).
+  // ON CONFLICT is atomic, so two deliveries arriving at the same moment
+  // cannot both insert — a SELECT-then-INSERT check could.
   await pool.query(
     `INSERT INTO acquirer_callback_notes
         (transaction_id, merchant_id, callback_id, callback_type, outcome, note, received_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     ON CONFLICT (callback_id) DO NOTHING`,
     [
       callback.transactionId,
       txnRow.merchant_id,

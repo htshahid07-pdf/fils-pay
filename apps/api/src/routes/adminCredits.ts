@@ -61,6 +61,12 @@ export async function adminCreditRoutes(app: FastifyInstance): Promise<void> {
 
     scope.post<{ Params: MerchantIdParams; Body: unknown }>(
       "/merchants/:id/credits",
+      // finance/super_admin only. This scope only has requireAdminSession
+      // (so support can READ the queue), and the create route inherited just
+      // that — any support operator could issue credits, and credits at or
+      // below the 50 BD threshold post straight to the ledger with no second
+      // person. createCreditRequest's docstring promised a 403 nobody enforced.
+      { preHandler: requireAdminRole("finance", "super_admin") },
       async (request, reply) => {
         const adminAuth = request.adminAuth;
         if (!adminAuth) throw new UnauthorizedError("unauthenticated");

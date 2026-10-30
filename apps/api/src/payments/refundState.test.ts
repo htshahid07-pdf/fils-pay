@@ -67,3 +67,27 @@ test("a partially captured transaction with nothing refunded stays partially_cap
     "partially_captured",
   );
 });
+
+// FP-212 §3.4 (Huda, September finance call): "refunded" when every fil captured went back,
+// whatever the capture size. Before, this case stayed partially_captured.
+test("a full refund of a PARTIAL capture is refunded", () => {
+  assert.equal(
+    nextStatusAfterRefund({
+      amountFils: toFils(10_000),
+      capturedFils: toFils(4_000),
+      refundedTotalFils: toFils(4_000),
+    }),
+    "refunded",
+  );
+});
+
+test("a partial refund of a partial capture keeps partially_captured (headroom stays open)", () => {
+  assert.equal(
+    nextStatusAfterRefund({
+      amountFils: toFils(10_000),
+      capturedFils: toFils(6_000),
+      refundedTotalFils: toFils(2_000),
+    }),
+    "partially_captured",
+  );
+});

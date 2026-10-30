@@ -30,6 +30,20 @@ func insertClosedBatchWithLine(t *testing.T, pool *pgxpool.Pool, merchantID uuid
 		t.Fatalf("insertClosedBatchWithLine: insert export line: %v", err)
 	}
 
+	// The merchant's payable lives in the ledger. This fixture used to write
+	// only the scheme export line, and RefreshBalanceCache read the balance
+	// from scheme lines (the 135K -> 7K bug); post the balanced capture group
+	// a real close is preceded by, so the expected figure comes from the ledger.
+	_, err = pool.Exec(ctx, `
+		INSERT INTO ledger_entries (entry_group_id, merchant_id, settlement_batch_id, account_id, direction, amount_fils, occurred_at, description)
+		SELECT g, $1, $2, a, d, $3, now(), 'refresh_test fixture'
+		  FROM (SELECT gen_random_uuid() AS g) x,
+		       (VALUES ('card_scheme_clearing', 'debit'), ('merchant_payable', 'credit')) v(a, d)
+	`, merchantID, batchID, amountFils)
+	if err != nil {
+		t.Fatalf("insertClosedBatchWithLine: insert ledger group: %v", err)
+	}
+
 	return batchID
 }
 

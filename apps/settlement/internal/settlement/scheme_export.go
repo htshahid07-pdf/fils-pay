@@ -24,12 +24,6 @@ func TruncateToSchemeAmount(grossFils money.Fils) money.Fils {
 	return (grossFils / 10) * 10
 }
 
-// SchemeAmountBD converts a transaction's gross fils to the BD value stored
-// in scheme_export_lines.amount (numeric(10,2)).
-func SchemeAmountBD(grossFils money.Fils) float64 {
-	return float64(grossFils) / 1000.0
-}
-
 // buildBatchClosedPayload builds the settlement.batch_closed outbox
 // payload, following the same shape convention the webhook dispatcher
 // depends on for every other event type (a top-level merchantId field,
@@ -37,15 +31,17 @@ func SchemeAmountBD(grossFils money.Fils) float64 {
 func buildBatchClosedPayload(
 	merchantID, batchID uuid.UUID,
 	batchDate time.Time,
-	grossFils, feeFils, netPayoutFils money.Fils,
+	grossFils, feeFils, refundedFils, feeReversedFils, netPayoutFils money.Fils,
 ) ([]byte, error) {
 	payload := map[string]any{
-		"merchantId":    merchantID.String(),
-		"batchId":       batchID.String(),
-		"batchDate":     batchDate.Format("2006-01-02"),
-		"grossFils":     int64(grossFils),
-		"feeFils":       int64(feeFils),
-		"netPayoutFils": int64(netPayoutFils),
+		"merchantId":      merchantID.String(),
+		"batchId":         batchID.String(),
+		"batchDate":       batchDate.Format("2006-01-02"),
+		"grossFils":       int64(grossFils),
+		"feeFils":         int64(feeFils),
+		"refundedFils":    int64(refundedFils),
+		"feeReversedFils": int64(feeReversedFils),
+		"netPayoutFils":   int64(netPayoutFils),
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {

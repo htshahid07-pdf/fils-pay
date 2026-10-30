@@ -156,26 +156,41 @@ async function applyBatchClosed(client: PoolClient, row: OutboxEventRow): Promis
 
 
 /**
- * Rolls up a running daily refund summary, keyed by calendar date.
- * Called from the refund event path once refund events are wired into
- * the outbox (the consumer SELECT in runConsumerPass will include
- * "transaction.refunded" once the refund flow lands).
+ * Rolls up a running daily refund summary, keyed by the Asia/Bahrain
+ * business date (same bucketing as applyTransactionCaptured).
+ * `toISOString().slice(0, 10)` was the UTC date: a refund at 01:30 Bahrain
+ * time landed on the previous day's row.
  */
 export async function applyDailySummaryRollup(
   client: PoolClient,
   merchantId: string,
   occurredAt: Date,
   amountFils: number,
+  feeReversedFils: number,
 ): Promise<void> {
-  const summaryDate = occurredAt.toISOString().slice(0, 10);
+  const summaryDate = toBahrainDateString(occurredAt);
   await client.query(
-    `INSERT INTO merchant_daily_volume (merchant_id, volume_date, refund_count, refund_gross_fils, last_updated_at)
-     VALUES ($1, $2, 1, $3, now())
+    `INSERT INTO merchant_daily_volume
+        (merchant_id, volume_date, refund_count, refund_gross_fils, refund_fee_reversed_fils, last_updated_at)
+     VALUES ($1, $2, 1, $3, $4, now())
      ON CONFLICT (merchant_id, volume_date) DO UPDATE
        SET refund_count = merchant_daily_volume.refund_count + 1,
            refund_gross_fils = merchant_daily_volume.refund_gross_fils + EXCLUDED.refund_gross_fils,
+           refund_fee_reversed_fils = merchant_daily_volume.refund_fee_reversed_fils + EXCLUDED.refund_fee_reversed_fils,
            last_updated_at = now()`,
-    [merchantId, summaryDate, amountFils],
+    [merchantId, summaryDate, amountFils, feeReversedFils],
+  );
+}
+
+/** refund.succeeded — the exact per-refund figures processRefund enqueued. */
+async function applyRefundSucceeded(client: PoolClient, row: OutboxEventRow): Promise<void> {
+  const payload = row.payload as { merchantId: string; amountFils: number; feeReversedFils?: number };
+  await applyDailySummaryRollup(
+    client,
+    payload.merchantId,
+    row.created_at,
+    payload.amountFils,
+    payload.feeReversedFils ?? 0,
   );
 }
 
@@ -194,6 +209,8 @@ export async function applyEvent(client: PoolClient, row: OutboxEventRow): Promi
       return applyTransactionCaptured(client, row);
     case "transaction.voided":
       return applyTransactionVoided(client, row);
+    case "refund.succeeded":
+      return applyRefundSucceeded(client, row);
     case "settlement.batch_closed":
       return applyBatchClosed(client, row);
     default:

@@ -3,6 +3,9 @@ import { BadRequestError, UnauthorizedError } from "../lib/errors.js";
 import { verifyAcquirerCallbackSignature } from "../webhooks/inboundVerify.js";
 import { applyAcquirerCallback, withCallbackRetry, type AcquirerCallbackInput } from "../acquirer/callbacks.js";
 
+/** Raw body per request, captured by the scoped JSON parser below. */
+const rawBodies = new WeakMap<FastifyRequest, string>();
+
 // header name confirmed with the acquirer's integration guide v3.2 — am
 const ACQUIRER_SIGNATURE_HEADER = "acquirer-callback-signature";
 
@@ -38,6 +41,19 @@ function getSignatureHeader(request: FastifyRequest): string | undefined {
  * endpoint has.
  */
 export async function acquirerCallbackRoutes(app: FastifyInstance): Promise<void> {
+  // Keep the exact request body string: the signature covers the bytes the
+  // acquirer sent, not our re-serialization of the parsed JSON (FP-240).
+  // Scoped to this plugin (Fastify encapsulation), so no other route's JSON
+  // parsing changes.
+  app.addContentTypeParser("application/json", { parseAs: "string" }, (request, rawBody, done) => {
+    rawBodies.set(request, rawBody as string);
+    try {
+      done(null, JSON.parse(rawBody as string));
+    } catch {
+      done(new BadRequestError("invalid_json", "request body is not valid JSON"), undefined);
+    }
+  });
+
   app.post<{ Body: AcquirerCallbackBody }>("/callbacks", async (request, reply) => {
     const body = request.body ?? {};
     if (
@@ -55,10 +71,10 @@ export async function acquirerCallbackRoutes(app: FastifyInstance): Promise<void
     }
 
     const verification = verifyAcquirerCallbackSignature(
-      body,
+      rawBodies.get(request) ?? "",
       getSignatureHeader(request),
       app.config.acquirerCallbackSigningSecret,
-      app.config.acquirerCallbackRequireSignature,
+      { requireSignature: app.config.acquirerCallbackRequireSignature },
     );
     if (!verification.valid) {
       throw new UnauthorizedError("invalid_signature", verification.reason);

@@ -9,6 +9,8 @@ import { applyEvent, type OutboxEventRow } from "./applyEvent.js";
 export const REPORTING_EVENT_TYPES: readonly EventType[] = [
   "transaction.captured",
   "transaction.voided",
+  // FP-212: refunds count in the daily rollup (applyEvent -> applyRefundSucceeded).
+  "refund.succeeded",
   "settlement.batch_closed",
 ];
 

@@ -9,6 +9,7 @@ import {
 import { ApiError, describeError } from "../../api/client.js";
 import { RequireRole } from "../../auth/RequireRole.js";
 import { bhd, dash, dateTime } from "../../format.js";
+import { RefundDrawer } from "./RefundDrawer.js";
 import type { TransactionDto, TransactionEventDto } from "../../types.js";
 
 type LoadState =
@@ -27,7 +28,7 @@ type LoadState =
  * this page does not undo that by guessing.
  */
 // MK: timeline renders refund events fine
-// FH: RefundDrawer import removed 2026-06 until the route exists
+// FP-212: POST /v1/refunds exists now, so the RefundDrawer is back below.
 export function TransactionDetailPage() {
   const { id } = useParams<{ id: string }>();
   const [state, setState] = useState<LoadState>({ kind: "loading" });
@@ -151,6 +152,8 @@ export function TransactionDetailPage() {
         <dd>{bhd(txn.amountFils)}</dd>
         <dt>Captured amount</dt>
         <dd>{bhd(txn.capturedFils)}</dd>
+        <dt>Refunded amount</dt>
+        <dd>{bhd(txn.refundedFils ?? 0)}</dd>
         <dt>Currency</dt>
         <dd>{txn.currency}</dd>
         <dt>Reference</dt>
@@ -221,6 +224,11 @@ export function TransactionDetailPage() {
           </div>
         ) : null}
       </RequireRole>
+
+      {/* Renders only for captured / partially_captured / partially_refunded
+          and only for owner/finance; the API enforces both server-side too.
+          load() refetches the transaction AND its timeline after a refund. */}
+      <RefundDrawer txn={txn} onRefunded={load} />
 
       <h2>Event timeline</h2>
       <table className="dash-table">

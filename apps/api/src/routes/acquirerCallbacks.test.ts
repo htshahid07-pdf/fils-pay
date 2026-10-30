@@ -59,7 +59,9 @@ function callbackBody(transactionId: string, callbackId: string) {
   };
 }
 
-function signatureHeader(body: unknown, secret = ACQUIRER_SECRET, timestamp = 1_757_930_000): string {
+// Fresh timestamp: verification now enforces a 300 s window (FP-240). The
+// fixed 2025 timestamp used before only passed because `t` was never checked.
+function signatureHeader(body: unknown, secret = ACQUIRER_SECRET, timestamp = Math.floor(Date.now() / 1000)): string {
   const signature = createHmac("sha256", secret).update(`${timestamp}.${JSON.stringify(body)}`).digest("hex");
   return `t=${timestamp},v1=${signature}`;
 }
@@ -119,12 +121,10 @@ test("POST /v1/acquirer/callbacks rejects a tampered signature", async () => {
   assert.equal(await noteCount(callbackId), "0");
 });
 
-// dev-mode behaviour (empty secret). prod rejects — MK
-// am: the test app config sets a secret though? line ~40
-test("POST /v1/acquirer/callbacks accepts a callback sent without a signature header", async () => {
-  // Documents current behavior for the acquirer sandbox's pre-signing
-  // tooling: with no header there is nothing to verify, so the callback is
-  // processed rather than rejected.
+// Was: "accepts a callback sent without a signature header" — i.e. the test
+// pinned the hole: the only authentication on this public endpoint was
+// optional. An unsigned callback must be rejected and must write nothing.
+test("POST /v1/acquirer/callbacks rejects a callback sent without a signature header", async () => {
   const transactionId = await createTransaction();
   const callbackId = `acqcb_${randomUUID()}`;
 
@@ -134,8 +134,43 @@ test("POST /v1/acquirer/callbacks accepts a callback sent without a signature he
     payload: callbackBody(transactionId, callbackId),
   });
 
-  assert.equal(res.statusCode, 200);
-  assert.deepEqual(res.json(), { received: true });
+  assert.equal(res.statusCode, 401);
+  assert.equal(res.json().message, "missing_signature");
+  assert.equal(await noteCount(callbackId), "0");
+});
+
+test("POST /v1/acquirer/callbacks rejects a replayed (stale) signature", async () => {
+  const transactionId = await createTransaction();
+  const callbackId = `acqcb_${randomUUID()}`;
+  const body = callbackBody(transactionId, callbackId);
+
+  const res = await app.inject({
+    method: "POST",
+    url: "/v1/acquirer/callbacks",
+    headers: { "acquirer-callback-signature": signatureHeader(body, ACQUIRER_SECRET, Math.floor(Date.now() / 1000) - 3600) },
+    payload: body,
+  });
+
+  assert.equal(res.statusCode, 401);
+  assert.equal(res.json().message, "timestamp_out_of_tolerance");
+});
+
+// FP-201 (reopened): the bank sent the same callback twice and two identical
+// notes were saved. The second delivery must be acknowledged but not stored.
+test("POST /v1/acquirer/callbacks stores a redelivered callbackId only once", async () => {
+  const transactionId = await createTransaction();
+  const callbackId = `acqcb_${randomUUID()}`;
+  const body = callbackBody(transactionId, callbackId);
+
+  for (let i = 0; i < 2; i++) {
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/acquirer/callbacks",
+      headers: { "acquirer-callback-signature": signatureHeader(body) },
+      payload: body,
+    });
+    assert.equal(res.statusCode, 200, res.body);
+  }
   assert.equal(await noteCount(callbackId), "1");
 });
 

@@ -47,3 +47,17 @@ func BusinessDayWindow(date time.Time) (start, end time.Time) {
 	end = start.AddDate(0, 0, 1)
 	return start, end
 }
+
+// BusinessDateAt returns the Asia/Bahrain calendar date that contains the
+// instant t, as a date value suitable for BusinessDayWindow / CloseBatch.
+//
+// BusinessDayWindow deliberately reads only the calendar date of its
+// argument (callers pass dates like --date=2026-09-09), so a caller holding
+// an *instant* must convert it to Bahrain's calendar first. Passing a UTC
+// instant straight in gives the UTC date, which is still "yesterday" for
+// the first three hours of every Bahrain day (00:00-03:00 local = 21:00-24:00
+// UTC) — exactly why the daily close fired at ~03:15 instead of ~00:15.
+func BusinessDateAt(t time.Time) time.Time {
+	y, m, d := t.In(businessDayLocation).Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+}

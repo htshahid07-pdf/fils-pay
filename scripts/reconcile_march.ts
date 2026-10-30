@@ -13,9 +13,26 @@ import { pathToFileURL } from "node:url";
 import { Client } from "pg";
 import { formatBhd, toFils } from "@filspay/money";
 
+/** Asia/Bahrain is a fixed UTC+3 with no DST, so a Bahrain wall-clock
+ *  midnight is always the UTC midnight minus three hours. */
+const BAHRAIN_UTC_OFFSET_MS = 3 * 60 * 60 * 1000;
+
+/** [start, end) of a calendar month in Asia/Bahrain time — the settlement
+ *  business calendar — not a UTC month. A UTC month starts at 03:00 Bahrain
+ *  on the 1st and runs to 03:00 on the 1st of the next month, so it puts the
+ *  first three hours of March into February and the first three hours of
+ *  April into March. */
 export function monthBounds(year: number, month: number): { start: Date; end: Date } {
-  return { start: new Date(Date.UTC(year, month - 1, 1)), end: new Date(Date.UTC(year, month, 1)) };
+  return {
+    start: new Date(Date.UTC(year, month - 1, 1) - BAHRAIN_UTC_OFFSET_MS),
+    end: new Date(Date.UTC(year, month, 1) - BAHRAIN_UTC_OFFSET_MS),
+  };
 }
+
+/** Every leg this sweep posts carries this exact description; it is how a
+ *  re-run recognises a merchant that has already been swept, including by
+ *  earlier runs of this script (which used a random entry_group_id). */
+export const SWEEP_DESCRIPTION = "March 2026 scheme rounding residue sweep — manual recon per finance";
 
 export interface ResidueRow {
   merchantId: string;
@@ -68,17 +85,31 @@ function groupByMerchant(rows: ResidueRow[]): MerchantResidue[] {
   return [...byMerchant.values()];
 }
 
-// am: re-running is safe, entry_group_id dedupes it
-async function postResidueCorrection(client: Client, merchant: MerchantResidue, now: Date): Promise<void> {
-  if (merchant.residueFils <= 0) return;
+/**
+ * Posts one merchant's correction, unless that merchant was already swept.
+ * Returns false when it skipped. entry_group_id is a fresh random UUID per
+ * call, so it can never "dedupe" anything — the guard below is what makes a
+ * re-run safe. The caller holds a transaction-scoped advisory lock, so two
+ * concurrent runs cannot both pass the guard.
+ */
+async function postResidueCorrection(client: Client, merchant: MerchantResidue, effectiveAt: Date): Promise<boolean> {
+  if (merchant.residueFils <= 0) return false;
+  const already = await client.query(
+    `SELECT 1 FROM ledger_entries
+      WHERE merchant_id = $1 AND account_id = 'scheme_rounding_residue' AND description = $2
+      LIMIT 1`,
+    [merchant.merchantId, SWEEP_DESCRIPTION],
+  );
+  if (already.rowCount) return false;
   const entryGroupId = randomUUID();
-  const description = "March 2026 scheme rounding residue sweep — manual recon per finance";
+  const description = SWEEP_DESCRIPTION;
   await client.query(
     `INSERT INTO ledger_entries (entry_group_id, merchant_id, account_id, direction, amount_fils, occurred_at, description)
      VALUES ($1, $2, 'merchant_payable', 'debit', $3, $4, $5),
             ($1, $2, 'scheme_rounding_residue', 'credit', $3, $4, $5)`,
-    [entryGroupId, merchant.merchantId, merchant.residueFils, now.toISOString(), description],
+    [entryGroupId, merchant.merchantId, merchant.residueFils, effectiveAt.toISOString(), description],
   );
+  return true;
 }
 
 async function main(): Promise<void> {
@@ -96,19 +127,29 @@ async function main(): Promise<void> {
     const rows = await fetchResidueRows(client, 2026, 3);
     const merchantResidues = groupByMerchant(rows);
     const totalResidueFils = merchantResidues.reduce((sum, m) => sum + m.residueFils, 0);
+    let sweptResidueFils = 0;
 
     const { start, end } = monthBounds(2026, 3);
+    // Corrections carry the effective date of the period they correct
+    // (ARCHITECTURE.md, "The ledger"): the last second of March, Bahrain time.
+    const effectiveAt = new Date(end.getTime() - 1000);
     console.log("=== March 2026 reconciliation sweep ===");
     console.log(`run at: ${now.toISOString()}`);
-    console.log(`window: ${start.toISOString().slice(0, 10)} .. ${end.toISOString().slice(0, 10)}`);
+    console.log(`window: ${start.toISOString()} .. ${end.toISOString()} (Asia/Bahrain month)`);
+    console.log(`posting with effective date: ${effectiveAt.toISOString()}`);
     console.log("");
 
     await client.query("BEGIN");
     try {
+      // Serialise concurrent runs: the second one waits here, then sees the
+      // first run's rows in the guard and skips every merchant.
+      await client.query("SELECT pg_advisory_xact_lock(hashtext('scripts/reconcile_march:2026-03'))");
       for (const merchant of merchantResidues) {
-        await postResidueCorrection(client, merchant, now);
+        const posted = await postResidueCorrection(client, merchant, effectiveAt);
+        if (posted) sweptResidueFils += merchant.residueFils;
         console.log(
-          `merchant ${merchant.merchantId}: ${merchant.lineCount} line(s), residue ${formatBhd(toFils(merchant.residueFils))} BD (${merchant.residueFils} fils)`,
+          `merchant ${merchant.merchantId}: ${merchant.lineCount} line(s), residue ${formatBhd(toFils(merchant.residueFils))} BD (${merchant.residueFils} fils)` +
+            (posted ? "" : " — already swept, skipped"),
         );
       }
       await client.query("COMMIT");
@@ -119,7 +160,8 @@ async function main(): Promise<void> {
 
     console.log("---");
     console.log(`total lines matched: ${rows.length}`);
-    console.log(`total residue swept: ${formatBhd(toFils(totalResidueFils))} BD (${totalResidueFils} fils)`);
+    console.log(`total residue found: ${formatBhd(toFils(totalResidueFils))} BD (${totalResidueFils} fils)`);
+    console.log(`posted by this run:  ${formatBhd(toFils(sweptResidueFils))} BD (${sweptResidueFils} fils)`);
     console.log("");
     console.log("reconciliation applied successfully");
   } finally {

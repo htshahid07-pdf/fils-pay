@@ -64,7 +64,11 @@ func RecalculateMDR(ctx context.Context, db *pgxpool.Pool, merchantID uuid.UUID,
 		SELECT id, batch_date, status, gross_fils, fee_fils, net_payout_fils
 		  FROM settlement_batches
 		 WHERE merchant_id = $1 AND batch_date >= $2 AND batch_date < $3
-		   AND status <> 'open'
+		   -- Only 'closed' (frozen, not yet paid). A 'paid' batch's money has
+		   -- already left: its fee/net figures are what the bank instruction,
+		   -- statement and reports were built from and must never change.
+		   -- This was status <> 'open', which also selected paid batches.
+		   AND status = 'closed'
 		 ORDER BY batch_date
 		 FOR UPDATE
 	`, merchantID, from, to)
@@ -100,7 +104,10 @@ func RecalculateMDR(ctx context.Context, db *pgxpool.Pool, merchantID uuid.UUID,
 		if diff == 0 {
 			continue
 		}
-		newNetPayout := b.grossFils - newFee
+		// Shift net by exactly the fee difference. `gross - newFee` dropped
+		// the batch's refund deduction (FP-212: net = gross - fee - refunded
+		// + fee_reversed), silently paying refunded money out again.
+		newNetPayout := b.netPayoutFils - diff
 		// am: posts against the OLD batch id so it never lands in a new payout?? fixed in FP-244 i think
 		if err := postMdrAdjustment(ctx, tx, merchantID, b.id, diff); err != nil {
 			return RecalcResult{}, err
@@ -139,7 +146,9 @@ func RecalculateMDR(ctx context.Context, db *pgxpool.Pool, merchantID uuid.UUID,
 // CloseBatch would have produced at today's rate.
 func recomputeBatchFee(ctx context.Context, tx pgx.Tx, batchID uuid.UUID, mdrBps, discountBps int64) (money.Fils, error) {
 	rows, err := tx.Query(ctx, `
-		SELECT amount_fils FROM transaction_events WHERE settlement_batch_id = $1 ORDER BY id
+		SELECT amount_fils FROM transaction_events
+		 WHERE settlement_batch_id = $1 AND event_type IN ('captured', 'partially_captured')
+		 ORDER BY id
 	`, batchID)
 	if err != nil {
 		return 0, fmt.Errorf("settlement: RecalculateMDR: select batch events for %s: %w", batchID, err)
@@ -152,8 +161,10 @@ func recomputeBatchFee(ctx context.Context, tx pgx.Tx, batchID uuid.UUID, mdrBps
 		if err := rows.Scan(&amountFils); err != nil {
 			return 0, fmt.Errorf("settlement: RecalculateMDR: scan batch event for %s: %w", batchID, err)
 		}
-		// FH: sums every event with this batch id -- incl. refund events once FP-212 lands? need an event_type filter?
-		// MK: refunds won't carry settlement_batch_id on transaction_events, they live in their own table. non-issue
+		// FP-212: refund events DO carry settlement_batch_id now (CloseBatch
+		// step 8b), so the query above filters to capture events: a refund's
+		// negative amount must not shrink the batch's MDR. Its fee reversal is
+		// already frozen in settlement_batches.fee_reversed_fils.
 		fee += ComputeSettlementFee(money.Fils(amountFils), mdrBps, discountBps)
 	}
 	if err := rows.Err(); err != nil {

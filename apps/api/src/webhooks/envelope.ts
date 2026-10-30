@@ -6,7 +6,7 @@
  * the outbox payload unchanged.
  */
 
-export type WebhookEventType = "transaction.captured" | "transaction.voided" | "settlement.paid";
+export type WebhookEventType = "transaction.captured" | "transaction.voided" | "refund.succeeded" | "settlement.paid";
 
 export interface WebhookEnvelope {
   /** = webhook_deliveries.delivery_event_id — the dedup key */
@@ -64,6 +64,23 @@ export function buildEnvelope(deliveryEventId: string, outboxEvent: OutboxEventF
         data: {
           transactionId: outboxEvent.aggregateId,
           merchantId: outboxEvent.payload.merchantId,
+        },
+      };
+    case "refund.succeeded":
+      // Explicit field mapping like the cases above; the outbox payload's
+      // internal "newStatus" is published as "status".
+      return {
+        id: deliveryEventId,
+        type: "refund.succeeded",
+        createdAt,
+        data: {
+          transactionId: outboxEvent.aggregateId,
+          merchantId: outboxEvent.payload.merchantId,
+          refundId: outboxEvent.payload.refundId,
+          amountFils: outboxEvent.payload.amountFils,
+          feeReversedFils: outboxEvent.payload.feeReversedFils,
+          refundedTotalFils: outboxEvent.payload.refundedTotalFils,
+          status: outboxEvent.payload.newStatus,
         },
       };
     case "settlement.paid":

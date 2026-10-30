@@ -21,10 +21,13 @@ export interface CurrentFeeScheduleDisplay {
  * simplest way to answer "most recently agreed," since that's literally
  * when the row was entered.
  */
-// MK 15/06/2026: shouldnt this be effective_from <= now() like feeSchedule.ts? a backdated
-// correction entered today would show as "current"
-// FH: asked Claude, it said created_at is right for "most recently agreed" (see docblock). resolved
-// am: display only, nobody bills off this. leave it
+// The rate shown must be the rate we actually charge, so this resolves the
+// schedule exactly like capture/settlement do (feeSchedule.ts and
+// fee_schedule.go): the newest row whose effective_from has arrived, ties by
+// created_at. Ordering by created_at alone made a backdated backfill
+// (245 bps effective March, keyed in August) look "current" while every
+// payment was charged the August 225 bps row; a future-dated row would also
+// have shown before it took effect.
 export async function getCurrentFeeScheduleForDisplay(
   pool: Pool,
   merchantId: string,
@@ -32,8 +35,8 @@ export async function getCurrentFeeScheduleForDisplay(
   const result = await pool.query<{ mdr_bps: number; effective_from: Date; created_at: Date }>(
     `SELECT mdr_bps, effective_from, created_at
        FROM fee_schedules
-      WHERE merchant_id = $1
-      ORDER BY created_at DESC
+      WHERE merchant_id = $1 AND effective_from <= now()
+      ORDER BY effective_from DESC, created_at DESC
       LIMIT 1`,
     [merchantId],
   );

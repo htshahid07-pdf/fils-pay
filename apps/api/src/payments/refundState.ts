@@ -44,6 +44,18 @@ export function nextStatusAfterRefund(input: PostRefundStatusInput): PostRefundS
   // am: so capture 4000 on a 10000 auth, refund all 4000, and it still says
   // partially_captured and can be refunded again?? feels wrong
   // YA: no, refundValidation stops the second refund since refunded == captured
+  // FP-212: Huda's September rule is the latest decision and supersedes the
+  // July note above: "refunded" when every fil captured went back, whatever
+  // the capture size. Checked FIRST — before, a fully refunded PARTIAL
+  // capture fell into the headroom branch below and stayed
+  // partially_captured, so the dashboard still offered a refund for a
+  // transaction with nothing left to give back.
+  if (
+    compareFils(input.refundedTotalFils, ZERO_FILS) > 0 &&
+    compareFils(input.refundedTotalFils, input.capturedFils) >= 0
+  ) {
+    return "refunded";
+  }
   if (compareFils(input.capturedFils, input.amountFils) < 0) {
     return "partially_captured";
   }

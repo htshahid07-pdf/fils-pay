@@ -239,7 +239,26 @@ test("canceled link is rejected via both read and pay", async () => {
   assert.equal(payRes.json().error, "payment_link_canceled");
 });
 
-// no cross-merchant cancel case here. covered in webhooks.test.ts style elsewhere? — am
+// Regression: "I cancelled merchant B's payment link from merchant A's
+// dashboard". A passes the path check with its own merchantId; the link id
+// is B's. It must be a 404 and B's link must stay active and payable.
+test("cancel: another merchant's link id is 404 and the link stays active", async () => {
+  const merchantA = await createApprovedMerchantWithApiKey("cancel-idor-a");
+  const merchantB = await createApprovedMerchantWithApiKey("cancel-idor-b");
+  const linkOfB = await createLink(merchantB.rawKey, merchantB.merchantId, {});
+
+  const attack = await app.inject({
+    method: "DELETE",
+    url: `/v1/merchants/${merchantA.merchantId}/payment-links/${linkOfB.id}`,
+    headers: authHeader(merchantA.rawKey),
+  });
+  assert.equal(attack.statusCode, 404, attack.body);
+  assert.equal(attack.json().error, "payment_link_not_found");
+
+  const status = await pool.query<{ status: string }>(`SELECT status FROM payment_links WHERE id = $1`, [linkOfB.id]);
+  assert.equal(status.rows[0]!.status, "active");
+});
+
 test("cancel: happy path 204, nonexistent id -> 404, already-paid -> 409", async () => {
   const owner = await createApprovedMerchantWithApiKey("cancel-owner");
 

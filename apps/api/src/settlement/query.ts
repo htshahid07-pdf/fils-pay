@@ -10,6 +10,10 @@ export interface SettlementBatchDto {
   status: string;
   grossFils: number;
   feeFils: number;
+  /** FP-212: refunds deducted from this batch (sum of |refund amount|). */
+  refundedFils: number;
+  /** FP-212: MDR given back on those refunds (recorded at refund time). */
+  feeReversedFils: number;
   netPayoutFils: number;
   closedAt: string | null;
   paidAt: string | null;
@@ -22,6 +26,8 @@ interface SettlementBatchRow {
   status: string;
   gross_fils: string | number;
   fee_fils: string | number;
+  refunded_fils: string | number;
+  fee_reversed_fils: string | number;
   net_payout_fils: string | number;
   closed_at: Date | null;
   paid_at: Date | null;
@@ -49,7 +55,9 @@ function toBatchDateString(d: Date): string {
 
 /**
  * Maps a settlement_batches row to its DTO. Invariant (enforced by the Go
- * worker at close): netPayoutFils === grossFils - feeFils for every batch.
+ * worker at close): netPayoutFils === grossFils - feeFils - refundedFils +
+ * feeReversedFils for every batch (FP-212; the refund terms are 0 for a
+ * batch with no refunds, so older batches still read gross - fee).
  */
 function serializeBatch(row: SettlementBatchRow): SettlementBatchDto {
   return {
@@ -58,6 +66,8 @@ function serializeBatch(row: SettlementBatchRow): SettlementBatchDto {
     status: row.status,
     grossFils: Number(row.gross_fils),
     feeFils: Number(row.fee_fils),
+    refundedFils: Number(row.refunded_fils),
+    feeReversedFils: Number(row.fee_reversed_fils),
     netPayoutFils: Number(row.net_payout_fils),
     closedAt: row.closed_at ? row.closed_at.toISOString() : null,
     paidAt: row.paid_at ? row.paid_at.toISOString() : null,
@@ -117,7 +127,7 @@ export async function listSettlementBatches(
   const decodedCursor = decodeCursor(filters.cursor);
 
   const result = await pool.query<SettlementBatchRow>(
-    `SELECT id, batch_date, status, gross_fils, fee_fils, net_payout_fils, closed_at, paid_at
+    `SELECT id, batch_date, status, gross_fils, fee_fils, refunded_fils, fee_reversed_fils, net_payout_fils, closed_at, paid_at
        FROM settlement_batches
       WHERE merchant_id = $1
         AND ($2::date IS NULL OR batch_date >= $2)
@@ -166,7 +176,7 @@ export async function getSettlementBatch(
   input: { merchantId: string; batchId: string },
 ): Promise<SettlementBatchDetailDto | null> {
   const batchResult = await pool.query<SettlementBatchRow>(
-    `SELECT id, batch_date, status, gross_fils, fee_fils, net_payout_fils, closed_at, paid_at
+    `SELECT id, batch_date, status, gross_fils, fee_fils, refunded_fils, fee_reversed_fils, net_payout_fils, closed_at, paid_at
        FROM settlement_batches WHERE id = $1 AND merchant_id = $2`,
     [input.batchId, input.merchantId],
   );
@@ -177,9 +187,13 @@ export async function getSettlementBatch(
     pool.query<{ count: string }>(`SELECT count(*) FROM scheme_export_lines WHERE settlement_batch_id = $1`, [
       input.batchId,
     ]),
-    pool.query<{ count: string }>(`SELECT count(*) FROM transaction_events WHERE settlement_batch_id = $1`, [
-      input.batchId,
-    ]),
+    // Capture-type only, as documented above: refund events now carry a
+    // settlement_batch_id too (FP-212) and must not inflate this count.
+    pool.query<{ count: string }>(
+      `SELECT count(*) FROM transaction_events
+        WHERE settlement_batch_id = $1 AND event_type IN ('captured', 'partially_captured')`,
+      [input.batchId],
+    ),
   ]);
 
   return {
@@ -300,11 +314,16 @@ export async function getReconciliationReport(
           AND status IN ('closed', 'paid')`,
       [input.merchantId, input.from, input.to],
     ),
-    pool.query<{ amount_fils: string | number }>(
-      `SELECT te.amount_fils
+    // FP-212: refund events are pending money too. Only capture events were
+    // selected, so after any refund the ledger moved (-amount + fee
+    // reversed on merchant_payable) with nothing on this side to explain
+    // it, and the gap stopped being zero.
+    pool.query<{ event_type: string; amount_fils: string | number; fee_reversed_fils: string | null }>(
+      `SELECT te.event_type, te.amount_fils, te.metadata->>'feeReversedFils' AS fee_reversed_fils
          FROM transaction_events te
          JOIN transactions t ON t.id = te.transaction_id
-        WHERE t.merchant_id = $1 AND te.event_type IN ('captured', 'partially_captured')
+        WHERE t.merchant_id = $1
+          AND te.event_type IN ('captured', 'partially_captured', 'refunded', 'refund_partial')
           AND te.settlement_batch_id IS NULL
           AND te.occurred_at >= $2 AND te.occurred_at < $3`,
       [input.merchantId, windowStart, windowEnd],
@@ -324,6 +343,13 @@ export async function getReconciliationReport(
   let pendingUnbatchedFils = 0;
   for (const row of pendingResult.rows) {
     const amountFils = Number(row.amount_fils);
+    if (row.event_type === "refunded" || row.event_type === "refund_partial") {
+      // amount_fils is already negative on a refund event. Use the fee
+      // reversal processRefund RECORDED, never a recomputed estimate: it is
+      // exactly what was posted to the ledger.
+      pendingUnbatchedFils += amountFils + Number(row.fee_reversed_fils ?? 0);
+      continue;
+    }
     const feeFils = estimateFeeFils(amountFils, mdrBps, discountBps);
     pendingUnbatchedFils += amountFils - feeFils;
   }

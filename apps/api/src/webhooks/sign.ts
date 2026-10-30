@@ -33,9 +33,42 @@ export function signPayload(
   secret: string,
   timestamp: number = Math.floor(Date.now() / 1000),
 ): SignedPayload {
-  const signedString = `${timestamp}.${canonicalJson(payload)}`;
-  const signature = createHmac("sha256", secret).update(signedString).digest("hex");
+  return signBody(serializeWebhookBody(payload), secret, timestamp);
+}
+
+/**
+ * The one serialization of a webhook payload: the exact string that is both
+ * signed AND sent as the HTTP body (FP-240, YA's ya/sign-raw).
+ *
+ * The dispatcher used to sign canonicalJson(payload) but send
+ * JSON.stringify(payload). Those differ: the payload comes back from a JSONB
+ * column, and JSONB re-orders object keys (shorter keys first), so the body
+ * went out as {"id","data","type","createdAt"} while the signature covered
+ * {"createdAt","data","id","type"}. A merchant doing the standard check —
+ * HMAC over the raw request body — never matched; only receivers that
+ * re-parsed and re-canonicalized the JSON did ("some merchants can't verify").
+ */
+export function serializeWebhookBody(payload: unknown): string {
+  return canonicalJson(payload);
+}
+
+/** Signs `${timestamp}.${rawBody}` over the exact bytes that will be sent. */
+export function signBody(
+  rawBody: string,
+  secret: string,
+  timestamp: number = Math.floor(Date.now() / 1000),
+): SignedPayload {
+  const signature = createHmac("sha256", secret).update(`${timestamp}.${rawBody}`).digest("hex");
   return { timestamp, signature: `t=${timestamp},v1=${signature}` };
+}
+
+/**
+ * FP-240 name from the spec: sign a raw body string exactly as it will be
+ * sent. Same function as signBody (which dispatcher.ts and testSend.ts
+ * already use); signPayload's existing callers are left untouched.
+ */
+export function signRawBody(body: string, secret: string, timestamp?: number): SignedPayload {
+  return signBody(body, secret, timestamp);
 }
 
 interface ParsedSignatureHeader {
@@ -86,11 +119,24 @@ export function verifySignature(
   secret: string,
   options?: { toleranceSeconds?: number; now?: number },
 ): VerifySignatureResult {
+  return verifySignatureRawBody(serializeWebhookBody(payload), header, secret, options);
+}
+
+/**
+ * Verifies a delivery the way a merchant does: HMAC over the raw request
+ * body string, exactly as received. This is the check that used to fail.
+ */
+export function verifySignatureRawBody(
+  rawBody: string,
+  header: string,
+  secret: string,
+  options?: { toleranceSeconds?: number; now?: number },
+): VerifySignatureResult {
   const parsed = parseSignatureHeader(header);
   if (!parsed) return { valid: false, reason: "malformed_header" };
 
   const expected = createHmac("sha256", secret)
-    .update(`${parsed.timestamp}.${canonicalJson(payload)}`)
+    .update(`${parsed.timestamp}.${rawBody}`)
     .digest("hex");
 
   if (!timingSafeEqualHex(expected, parsed.signature)) {

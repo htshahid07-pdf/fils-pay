@@ -855,8 +855,22 @@ test("API key rotation issues a new key atomically and audits it; the previous k
   );
   assert.equal(rows.rowCount, 2);
   const [oldRow, newRow] = rows.rows;
-  assert.equal(oldRow!.revoked_at, null, "rotation does not revoke the previous key");
+  assert.equal(oldRow!.revoked_at, null, "rotation does not revoke the previous key immediately");
   assert.equal(oldRow!.revoked_reason, null);
+
+  // ...but it is scheduled to stop working when the overlap ends, and does.
+  const scheduled = await pool.query<{ revoke_after: Date | null }>(
+    `SELECT revoke_after FROM api_keys WHERE id = $1`,
+    [original.id],
+  );
+  assert.ok(scheduled.rows[0]!.revoke_after, "rotation must schedule the previous key's revocation");
+  await pool.query(`UPDATE api_keys SET revoke_after = now() - interval '1 second' WHERE id = $1`, [original.id]);
+  const afterOverlap = await app.inject({
+    method: "GET",
+    url: "/v1/transactions",
+    headers: { authorization: `Bearer ${original.rawKey}` },
+  });
+  assert.equal(afterOverlap.statusCode, 401, "the previous key is rejected once the overlap has ended");
   assert.equal(newRow!.id, rotated.id);
   assert.equal(newRow!.revoked_at, null);
   assert.equal(newRow!.created_by, null, "0037's XOR: an admin-issued key has no merchant_users actor");

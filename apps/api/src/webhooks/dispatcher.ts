@@ -3,9 +3,8 @@ import { Client, type Pool } from "pg";
 import type { Config } from "../config.js";
 import { withTransaction } from "../db/withTransaction.js";
 import { decodeEncryptionKey, decryptSecret } from "./secretCrypto.js";
-import { signPayload } from "./sign.js";
+import { serializeWebhookBody, signBody } from "./sign.js";
 import { buildEnvelope } from "./envelope.js";
-import { recordPayoutDisbursementEffect } from "./payoutDisbursement.js";
 import { WEBHOOK_DELIVERY_ID_HEADER, WEBHOOK_SIGNATURE_HEADER } from "./headers.js";
 import type { WebhookTransport } from "./transport.js";
 
@@ -28,18 +27,22 @@ const STEP_B_BATCH_LIMIT = 100;
 const WEBHOOK_ELIGIBLE_EVENT_TYPES: readonly string[] = [
   "transaction.captured",
   "transaction.voided",
+  // FP-212: processRefund has always enqueued refund.succeeded, but it was
+  // missing from this allow-list, so no merchant ever received it (being in
+  // packages/events' EventType union does not make the dispatcher send it).
+  "refund.succeeded",
   "settlement.paid",
 ];
 const NOTIFY_CHANNEL = "outbox_events_channel";
 
 type PreDeliveryEffect = (pool: Pool, payload: Record<string, unknown>) => Promise<void>;
 
-const PRE_DELIVERY_EFFECTS: Record<string, PreDeliveryEffect> = {
-  "settlement.paid": async (pool, payload) => {
-    const data = payload.data as { settlementBatchId: string; netPayoutFils: number };
-    await recordPayoutDisbursementEffect(pool, data.settlementBatchId, Number(data.netPayoutFils));
-  },
-};
+// No delivery may move or record money. The settlement.paid entry used to
+// write settlement_payout_disbursements here — once per endpoint delivery and
+// per replay, and never for merchants without an endpoint (incident
+// 2026-08-21). Disbursements are now recorded by apps/settlement's
+// PayoutBatch / PayoutSplitBatch in the transaction that pays the batch.
+const PRE_DELIVERY_EFFECTS: Record<string, PreDeliveryEffect> = {};
 
 export type DispatcherConfig = Pick<
   Config,
@@ -155,7 +158,11 @@ async function attemptOneDelivery(
 ): Promise<void> {
   const key = decodeEncryptionKey(config.webhookSecretEncryptionKey);
   const secret = decryptSecret(row.secret_ciphertext, key);
-  const { signature } = signPayload(row.payload, secret);
+  // Serialize ONCE and sign exactly what is sent (FP-240). Signing
+  // canonicalJson(...) but sending JSON.stringify(...) of a JSONB-reordered
+  // object meant the bytes on the wire never matched the signature.
+  const body = serializeWebhookBody(row.payload);
+  const { signature } = signBody(body, secret);
 
   if (row.attempt_count === 0) {
     const effect = PRE_DELIVERY_EFFECTS[row.event_type];
@@ -169,7 +176,7 @@ async function attemptOneDelivery(
       [WEBHOOK_DELIVERY_ID_HEADER]: row.delivery_event_id,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(row.payload),
+    body,
     timeoutMs: config.webhookRequestTimeoutMs,
   });
 

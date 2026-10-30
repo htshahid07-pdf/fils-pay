@@ -1,7 +1,9 @@
+import { randomUUID } from "node:crypto";
 import type { Pool } from "pg";
 import { toFils } from "@filspay/money";
 import { authorizeTransaction } from "../payments/authorize.js";
 import { captureTransaction } from "../payments/capture.js";
+import { voidTransaction } from "../payments/void.js";
 import type { AcquirerSimulator, SimulatedCardInput } from "../acquirer/types.js";
 
 export interface PayPaymentLinkInput {
@@ -24,17 +26,27 @@ interface ClaimedLinkRow {
   reference: string | null;
 }
 
+/** How long a reservation is protected once capture starts (crash recovery
+ *  after a capture that never finished = this lease + the normal timeout). */
+const CAPTURE_LEASE = "10 minutes";
+
 interface LinkStatusRow {
   status: string;
   expires_at: Date;
 }
 
-/** A pay request is judged against when the buyer pressed pay, so a
- * retry that lands after midnight is not penalised. */
-export function expiryReferenceTime(submittedAt?: string): Date {
-  if (!submittedAt) return new Date();
-  const parsed = new Date(submittedAt);
-  return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+/**
+ * The instant a link's expiry is judged against: always the server's clock.
+ *
+ * FP-187 ("payment link paid after expiry"): this used to return the
+ * client-supplied `submittedAt` when present. The public checkout endpoint
+ * is unauthenticated, so anyone could pay an expired link by sending
+ * `"submittedAt": "<any time before expiry>"`. A client's clock is not
+ * evidence of anything. The parameter is still accepted (API compatibility)
+ * but deliberately ignored.
+ */
+export function expiryReferenceTime(_submittedAt?: string): Date {
+  return new Date();
 }
 
 /**
@@ -62,9 +74,13 @@ export async function payPaymentLink(
   // Step 1 — claim. A single UPDATE is already atomic; no explicit
   // transaction needed.
   // YA: one conditional UPDATE = atomic claim, no explicit txn needed. correct
+  // Each claim gets its own reservation_id (incident 2026-05-14): every later
+  // step checks it, so a request whose stale reservation was re-claimed by
+  // another buyer finds out instead of carrying on.
+  const reservationId = randomUUID();
   const claimResult = await pool.query<ClaimedLinkRow>(
     `UPDATE payment_links
-        SET status = 'reserved', reserved_at = now()
+        SET status = 'reserved', reserved_at = now(), reservation_id = $4
       WHERE token = $1
         AND (
              status = 'active'
@@ -72,7 +88,7 @@ export async function payPaymentLink(
             )
         AND expires_at > $3
       RETURNING id, merchant_id, amount_fils, reference`,
-    [input.token, config.paymentLinkReservationTimeoutSeconds, expiryCheckTime],
+    [input.token, config.paymentLinkReservationTimeoutSeconds, expiryCheckTime, reservationId],
   );
 
   const claimedRow = claimResult.rows[0];
@@ -102,7 +118,7 @@ export async function payPaymentLink(
   });
 
   if (authResult.statusCode !== 201) {
-    await releaseReservation(pool, link.id);
+    await releaseReservation(pool, link.id, reservationId);
     return {
       statusCode: authResult.statusCode,
       body: { stage: "authorize", ...(authResult.body as Record<string, unknown>) },
@@ -110,6 +126,28 @@ export async function payPaymentLink(
   }
 
   const txnId = (authResult.body as { id: string }).id;
+
+  // Still ours? Authorization can be slow; if it outlived the reservation
+  // timeout, another buyer may have re-claimed this link. Confirm (and
+  // refresh) OUR reservation immediately before moving money. If it was
+  // taken over, release our authorization hold and stop — capturing here is
+  // exactly how incident 2026-05-14 charged two buyers for one link.
+  // reserved_at is pushed CAPTURE_LEASE into the future so the capture
+  // itself can never outlive the reservation and be re-claimed mid-flight.
+  const stillOurs = await pool.query(
+    `UPDATE payment_links SET reserved_at = now() + interval '${CAPTURE_LEASE}'
+      WHERE id = $1 AND status = 'reserved' AND reservation_id = $2
+      RETURNING id`,
+    [link.id, reservationId],
+  );
+  if (!stillOurs.rowCount) {
+    await voidTransaction(pool, {
+      transactionId: txnId,
+      merchantId: link.merchantId,
+      actor: { type: "system", id: link.id },
+    });
+    return { statusCode: 409, body: { error: "payment_link_processing" } };
+  }
 
   // NOTE: discountAdjustment is applied by the transactions route only, not here — FH
   // MK: it's applied for both now (moved into capture.ts in July)
@@ -126,7 +164,7 @@ export async function payPaymentLink(
   });
 
   if (captureResult.statusCode !== 200) {
-    await releaseReservation(pool, link.id);
+    await releaseReservation(pool, link.id, reservationId);
     return {
       statusCode: captureResult.statusCode,
       body: { stage: "capture", ...(captureResult.body as Record<string, unknown>) },
@@ -142,10 +180,10 @@ export async function payPaymentLink(
     paid_at: Date;
   }>(
     `UPDATE payment_links
-        SET status = 'paid', paid_at = now(), transaction_id = $2, reserved_at = NULL
-      WHERE id = $1 AND status = 'reserved'
+        SET status = 'paid', paid_at = now(), transaction_id = $2, reserved_at = NULL, reservation_id = NULL
+      WHERE id = $1 AND status = 'reserved' AND reservation_id = $3
       RETURNING id, paid_at`,
-    [link.id, txnId],
+    [link.id, txnId, reservationId],
   );
 
   const finalized = finalizeResult.rows[0];
@@ -185,10 +223,13 @@ export async function payPaymentLink(
  * 'reserved'` for the same reason as the finalize UPDATE: this request
  * only ever releases the reservation it itself holds.
  */
-async function releaseReservation(pool: Pool, linkId: string): Promise<void> {
-  await pool.query(`UPDATE payment_links SET status = 'active', reserved_at = NULL WHERE id = $1 AND status = 'reserved'`, [
-    linkId,
-  ]);
+async function releaseReservation(pool: Pool, linkId: string, reservationId: string): Promise<void> {
+  // Only the reservation this request holds — never another buyer's.
+  await pool.query(
+    `UPDATE payment_links SET status = 'active', reserved_at = NULL, reservation_id = NULL
+      WHERE id = $1 AND status = 'reserved' AND reservation_id = $2`,
+    [linkId, reservationId],
+  );
 }
 
 /**

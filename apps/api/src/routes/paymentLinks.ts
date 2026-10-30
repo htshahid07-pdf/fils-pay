@@ -47,8 +47,9 @@ interface ListPaymentLinksQuery {
   cursor?: string;
 }
 
-// am: this is the ownership check for create/cancel/list. cancel.ts relies on it, link ids are UUIDs
-// MK: it checks the path merchant, not that the link belongs to that merchant?
+// Checks the PATH merchant against the session. It does not, and cannot,
+// prove a link id belongs to that merchant — every query on a link id must
+// also filter on merchant_id (see paymentLinks/cancel.ts).
 function assertOwnMerchant(request: FastifyRequest<{ Params: MerchantIdParams }>): void {
   if (!request.merchantAuth || request.merchantAuth.merchantId !== request.params.merchantId) {
     throw new ForbiddenError("forbidden");
@@ -104,6 +105,9 @@ export async function paymentLinkMerchantRoutes(app: FastifyInstance): Promise<v
       assertOwnMerchant(request);
       const result = await cancelPaymentLink(app.db, {
         id: request.params.id,
+        // From the authenticated context, never from the URL (ARCHITECTURE.md
+        // "Security"); assertOwnMerchant above already proved they are equal.
+        merchantId: request.merchantAuth!.merchantId,
       });
       if (result.outcome === "canceled") {
         reply.code(204).send();
