@@ -5,4 +5,7 @@ dist/
 .env.local
 npm-debug.log*
 .DS_Store
-.claude/
+# Team AI setup is committed; personal Claude settings stay local.
+.claude/*
+!.claude/settings.json
+!.claude/commands/

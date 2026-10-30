@@ -6,7 +6,11 @@ cloud workspace where it ran PostgreSQL 16, Go and Node to reproduce and verify 
 
 | What | Where |
 | --- | --- |
-| Standing agent instructions (the project rules) | `ai/project-instructions.md` |
+| Agent instructions read automatically by Claude Code (replaces the planted original) | `CLAUDE.md` (repo root) |
+| Standing project rules we gave the AI in the claude.ai Project | `ai/project-instructions.md` |
+| Custom commands: `/reproduce`, `/fix`, `/verify-refund` (our reproduce, fix, verify loop) | `.claude/commands/` |
+| Tool configuration and permission rules (allow tests, ask before edits and commits, deny secrets, `packages/money`, applied migrations, seed, force-push) | `.claude/settings.json` |
+| The planted CLAUDE.md that shipped with the repo, kept as evidence | `ai/original-planted-CLAUDE.md` |
 | Edit helper: exact-match, CRLF-aware replace that refuses ambiguous edits | `ai/tools/rep.py` |
 | Old-vs-new scenario harness (FP-209, over-refund, cross-merchant, fee drift, FP-187, incident 05-14) | `ai/harness/scenarios.mts` |
 | Live probes for the security fixes (OTP bypass, roles, key rotation, ledger immutability, IDOR) | `ai/harness/probe.mjs` |
