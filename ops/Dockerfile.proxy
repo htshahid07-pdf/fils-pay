@@ -1,0 +1,24 @@
+# Builds both dashboards, then serves them with Caddy (the reverse proxy).
+FROM node:20 AS build
+WORKDIR /src
+COPY package.json package-lock.json ./
+COPY apps/api/package.json apps/api/
+COPY apps/reporting/package.json apps/reporting/
+COPY apps/web/package.json apps/web/
+COPY apps/admin/package.json apps/admin/
+COPY packages/money/package.json packages/money/
+COPY packages/events/package.json packages/events/
+RUN npm ci
+COPY . .
+# Public origin of the merchant dashboard; admin links "view as merchant" to it.
+ARG WEB_ORIGIN
+# Empty API base URL = call /v1 on the same origin, which Caddy forwards to the api.
+RUN printf 'VITE_API_BASE_URL=\n' > apps/web/.env.production \
+ && printf 'VITE_ADMIN_API_BASE_URL=\nVITE_WEB_BASE_URL=%s\n' "$WEB_ORIGIN" > apps/admin/.env.production \
+ && npm run build --workspace=@filspay/web \
+ && npm run build --workspace=@filspay/admin
+
+FROM caddy:2-alpine
+COPY ops/Caddyfile /etc/caddy/Caddyfile
+COPY --from=build /src/apps/web/dist /srv/web
+COPY --from=build /src/apps/admin/dist /srv/admin

@@ -1,0 +1,50 @@
+# Adds the reverse proxy on ports 80/443 and stops publishing the api and
+# Postgres ports directly. Use together with docker-compose.yml:
+#
+#   docker compose --env-file ops/proxy.env \
+#     -f ops/docker-compose.yml -f ops/docker-compose.proxy.yml up -d --build
+
+services:
+  proxy:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile.proxy
+      args:
+        WEB_ORIGIN: https://${FILSPAY_DOMAIN:?set FILSPAY_DOMAIN in ops/proxy.env}
+    environment:
+      FILSPAY_DOMAIN: ${FILSPAY_DOMAIN:?set FILSPAY_DOMAIN in ops/proxy.env}
+      ADMIN_DOMAIN: ${ADMIN_DOMAIN:?set ADMIN_DOMAIN in ops/proxy.env}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in ops/proxy.env}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  api:
+    # Only reachable through the proxy now.
+    ports: !reset []
+    environment:
+      # Payment links point buyers at the public checkout page.
+      CHECKOUT_BASE_URL: https://${FILSPAY_DOMAIN}
+    restart: unless-stopped
+
+  postgres:
+    # Never expose the database to the internet.
+    ports: !reset []
+    restart: unless-stopped
+
+  settlement:
+    restart: unless-stopped
+
+  reporting:
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:

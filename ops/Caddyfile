@@ -1,0 +1,52 @@
+# FilsPay reverse proxy (Caddy). Listens on 80/443, gets HTTPS certificates
+# automatically, and puts each dashboard on the same origin as the API so
+# the session cookies and /v1 calls work without CORS.
+#
+#   https://{$FILSPAY_DOMAIN}        merchant dashboard + /pay checkout
+#   https://{$ADMIN_DOMAIN}          admin dashboard
+#   /v1/*, /healthz, /readyz         -> api:3000 on both hosts
+#
+# Port 80 only redirects to HTTPS (Caddy does this by default).
+
+{
+	email {$ACME_EMAIL}
+}
+
+(api_routes) {
+	@api path /v1/* /healthz /readyz
+	handle @api {
+		reverse_proxy api:3000
+	}
+}
+
+(security_headers) {
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+}
+
+{$FILSPAY_DOMAIN} {
+	encode zstd gzip
+	import security_headers
+	import api_routes
+	handle {
+		root * /srv/web
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+{$ADMIN_DOMAIN} {
+	encode zstd gzip
+	import security_headers
+	import api_routes
+	handle {
+		root * /srv/admin
+		try_files {path} /index.html
+		file_server
+	}
+}
