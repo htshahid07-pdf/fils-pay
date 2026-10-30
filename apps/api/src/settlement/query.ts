@@ -303,7 +303,7 @@ export async function getReconciliationReport(
     pool.query<{ net: string }>(
       `SELECT COALESCE(SUM(CASE WHEN direction = 'credit' THEN amount_fils ELSE -amount_fils END), 0) AS net
          FROM ledger_entries
-        WHERE merchant_id = $1 AND account_id = 'merchant_payable'
+        WHERE merchant_id = $1 AND account_id = 'merchant_payable' AND description NOT LIKE 'settlement payout:%'
           AND occurred_at >= $2 AND occurred_at < $3`,
       [input.merchantId, windowStart, windowEnd],
     ),

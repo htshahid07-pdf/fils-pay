@@ -1,0 +1,11 @@
+   FROM node:20
+   WORKDIR /app
+   COPY package.json package-lock.json ./
+   COPY apps/api/package.json apps/api/
+   COPY apps/reporting/package.json apps/reporting/
+   COPY apps/web/package.json apps/web/
+   COPY apps/admin/package.json apps/admin/
+   COPY packages/money/package.json packages/money/
+   COPY packages/events/package.json packages/events/
+   RUN npm ci
+   COPY . .

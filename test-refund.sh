@@ -12,7 +12,7 @@ BASE_URL="${BASE_URL:-http://localhost:3000}"
 : "${BETA_KEY:?set BETA_KEY to Beta's API key}"
 
 pass=0
-uuid() { cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen; }
+uuid() { cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null || node -e "console.log(crypto.randomUUID())"; }
 # call METHOD PATH KEY [IDEMPOTENCY_KEY|-] [JSON]  -> sets STATUS and BODY
 call() {
   local method=$1 path=$2 key=$3 idem=${4:--} data=${5:-}
@@ -49,7 +49,10 @@ expect 200 '"feeReversedFils":45' "refund 2.000 BD -> fee reversed 45"
 [[ "$BODY" == *'"transactionStatus":"partially_captured"'* ]] || { echo "FAIL status: $BODY"; exit 1; }
 FIRST=$BODY
 call POST /v1/refunds "$ALPHA_KEY" "$KEY" "{\"transactionId\":\"$TXN\",\"amountFils\":2000,\"reason\":\"customer returned item\"}"
-[ "$STATUS" = 200 ] && [ "$BODY" = "$FIRST" ] && { pass=$((pass + 1)); echo "PASS  same key + same body replays the original"; } \
+# Compare as JSON, not bytes: the stored response comes back from a JSONB
+# column, which may order keys differently. Same refund id and values = replay.
+same_json() { node -e 'const s=(o)=>JSON.stringify(o,Object.keys(o).sort());process.exit(s(JSON.parse(process.argv[1]))===s(JSON.parse(process.argv[2]))?0:1)' "$1" "$2"; }
+[ "$STATUS" = 200 ] && same_json "$BODY" "$FIRST" && { pass=$((pass + 1)); echo "PASS  same key + same body replays the original"; } \
   || { echo "FAIL replay: $STATUS $BODY"; exit 1; }
 call POST /v1/refunds "$ALPHA_KEY" "$KEY" "{\"transactionId\":\"$TXN\",\"amountFils\":1000}"
 expect 422 'idempotency_key_reused' "same key + different body -> 422"

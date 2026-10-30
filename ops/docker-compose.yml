@@ -76,6 +76,7 @@ services:
     ports:
       - "3000:3000"
     environment:
+      ACQUIRER_FAILURE_RATE: "0"
       # One application role (filspay) owns the whole database in this
       # environment. Every service here, and the one-off migrate/seed jobs
       # above, authenticate as that same role, which keeps local
@@ -84,6 +85,7 @@ services:
       DATABASE_URL: postgres://filspay:filspay_dev_password@postgres:5432/filspay?sslmode=disable
       # TODO(YA, Jan): give the api its own role before anything is hosted.
       SETTLEMENT_INTERNAL_URL: http://settlement:8091
+      SETTLEMENT_INTERNAL_TOKEN: dev-token
     depends_on:
       postgres:
         condition: service_healthy
@@ -98,6 +100,7 @@ services:
     command: ["./settlement", "daemon"]
     environment:
       DATABASE_URL: postgres://filspay:filspay_dev_password@postgres:5432/filspay?sslmode=disable
+      SETTLEMENT_INTERNAL_TOKEN: dev-token
       # Batch close and scheme export get their own pool so a long close
       # can't starve the API's connections.
       # AM: PGCONN_SETTLEMENT is ignored while DATABASE_URL is set; kept for the
