@@ -3,6 +3,7 @@ import type { Pool } from "pg";
 import { toFils } from "@filspay/money";
 import { authorizeTransaction } from "../payments/authorize.js";
 import { captureTransaction } from "../payments/capture.js";
+import { applyCaptureDiscountAdjustment } from "../payments/discountAdjustment.js";
 import { voidTransaction } from "../payments/void.js";
 import type { AcquirerSimulator, SimulatedCardInput } from "../acquirer/types.js";
 
@@ -170,6 +171,14 @@ export async function payPaymentLink(
       body: { stage: "capture", ...(captureResult.body as Record<string, unknown>) },
     };
   }
+
+  // The merchant's negotiated discount, exactly as the merchant capture route
+  // (routes/transactions.ts) applies it. Payment-link checkouts never called
+  // this, so a discounted merchant paid the full MDR on every link payment
+  // while settlement (ComputeSettlementFee) assumed the discount: ledger and
+  // payout disagreed. A no-op for merchants without a discount; its own count
+  // guard makes it safe on a replayed capture.
+  await applyCaptureDiscountAdjustment(pool, { merchantId: link.merchantId, transactionId: txnId });
 
   // see incident 2026-05-14 — two customers charged on one link. root cause: the claim
   // MK: re-evaluation is exactly what makes it safe. the bug was in the web retry, closed

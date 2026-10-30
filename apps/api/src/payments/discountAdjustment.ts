@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Pool } from "pg";
-import { applyRateFils, toFils } from "@filspay/money";
+import { applyRateFils, subtractFils, toFils } from "@filspay/money";
+import { getEffectiveMdrBps } from "../fees/feeSchedule.js";
 import { withTransaction } from "../db/withTransaction.js";
 import { BadRequestError } from "../lib/errors.js";
 
@@ -36,8 +37,8 @@ export async function applyCaptureDiscountAdjustment(
   input: { merchantId: string; transactionId: string },
 ): Promise<void> {
   return withTransaction(pool, async (client) => {
-    const merchantRow = await client.query<{ negotiated_discount_bps: number }>(
-      `SELECT negotiated_discount_bps FROM merchants WHERE id = $1`,
+    const merchantRow = await client.query<{ negotiated_discount_bps: number; mdr_bps: number }>(
+      `SELECT negotiated_discount_bps, mdr_bps FROM merchants WHERE id = $1`,
       [input.merchantId],
     );
     const discountBps = merchantRow.rows[0]?.negotiated_discount_bps ?? 0;
@@ -61,8 +62,8 @@ export async function applyCaptureDiscountAdjustment(
     const counts = countRow.rows[0];
     if (counts && Number(counts.adjustments) >= Number(counts.capture_events)) return;
 
-    const eventRow = await client.query<{ metadata: { feeFils?: number } }>(
-      `SELECT metadata FROM transaction_events
+    const eventRow = await client.query<{ amount_fils: string; occurred_at: Date; metadata: { feeFils?: number } }>(
+      `SELECT amount_fils, occurred_at, metadata FROM transaction_events
         WHERE transaction_id = $1 AND event_type IN ('captured', 'partially_captured')
         ORDER BY occurred_at DESC, id DESC LIMIT 1`,
       [input.transactionId],
@@ -70,7 +71,19 @@ export async function applyCaptureDiscountAdjustment(
     const feeBeforeDiscount = toFils(eventRow.rows[0]?.metadata?.feeFils ?? 0);
     if (feeBeforeDiscount <= 0) return;
 
-    const discountFils = applyRateFils(feeBeforeDiscount, discountBps);
+    // Settlement's ComputeSettlementFee (Go) is the reference for fees (eng
+    // sync 2026-06-02: "Go is the reference for fees, capture.ts follows"):
+    // MDR on the DISCOUNTED AMOUNT. This used to discount the FEE instead,
+    // which rounds at a different point, so ledger and payout could differ by
+    // a fil per capture (5000 fils @275bps, 12.5% off: 121 here vs 120 in Go;
+    // the Go and TS unit tests pinned 14 and 15 for the same inputs). The
+    // rebate is now whatever brings the charged fee down to Go's figure, with
+    // the same effective-dated MDR capture.ts charged at the event's time.
+    const event = eventRow.rows[0]!;
+    const amountFils = toFils(Number(event.amount_fils));
+    const mdrBps = await getEffectiveMdrBps(client, input.merchantId, event.occurred_at, merchantRow.rows[0]!.mdr_bps);
+    const netFeeFils = applyRateFils(subtractFils(amountFils, applyRateFils(amountFils, discountBps)), mdrBps);
+    const discountFils = subtractFils(feeBeforeDiscount, netFeeFils);
     if (discountFils <= 0) return;
 
     const entryGroupId = randomUUID();

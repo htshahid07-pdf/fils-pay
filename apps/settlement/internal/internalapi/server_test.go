@@ -36,6 +36,32 @@ func mustPool(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
+// lockBalanceTests serializes, across PACKAGES, the DB tests that rebuild or
+// assert merchant_balances. `go test ./...` runs packages in parallel against
+// one database, and RebuildAllBalances / a daily batch run rewrite EVERY
+// merchant's cached balance, so a test in another package could overwrite
+// the drifted value this test had just planted (seen as "before = 12000,
+// want 999999"). The same key is used in internalapi, ledger and settlement.
+// The lock lives on its own connection and is released when the test ends.
+func lockBalanceTests(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire balance-test lock connection: %v", err)
+	}
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, balanceTestLockKey); err != nil {
+		conn.Release()
+		t.Fatalf("take balance-test lock: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = conn.Exec(context.Background(), `SELECT pg_advisory_unlock($1)`, balanceTestLockKey)
+		conn.Release()
+	})
+}
+
+const balanceTestLockKey int64 = 2120001
+
 // newTestServer starts the real handler over httptest. pool may be nil for
 // tests that never reach a handler body (auth and request-parsing tests).
 func newTestServer(t *testing.T, pool *pgxpool.Pool) *httptest.Server {
@@ -128,6 +154,7 @@ func decodeJSON(t *testing.T, resp *http.Response, into any) {
 
 func TestRunBatch_ValidTokenAndDate(t *testing.T) {
 	pool := mustPool(t)
+	lockBalanceTests(t, pool)
 	server := newTestServer(t, pool)
 
 	merchantID := insertActiveMerchant(t, pool)
@@ -238,6 +265,7 @@ func TestRunBatch_MerchantScopedOnlyAffectsThatMerchant(t *testing.T) {
 // FH: 12000 = export total = what support sees in the console, so the test is right
 func TestRebuildBalances_ValidToken(t *testing.T) {
 	pool := mustPool(t)
+	lockBalanceTests(t, pool)
 	server := newTestServer(t, pool)
 
 	merchantID := insertActiveMerchant(t, pool)

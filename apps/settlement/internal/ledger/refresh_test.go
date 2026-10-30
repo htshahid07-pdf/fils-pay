@@ -49,6 +49,7 @@ func insertClosedBatchWithLine(t *testing.T, pool *pgxpool.Pool, merchantID uuid
 
 func TestRefreshBalanceCache_OverwritesDriftedCache(t *testing.T) {
 	pool := mustPool(t)
+	lockBalanceTests(t, pool)
 	merchantID := insertActiveMerchant(t, pool)
 
 	insertClosedBatchWithLine(t, pool, merchantID, "2026-06-10", 25000, 1)
@@ -93,6 +94,7 @@ func TestRefreshBalanceCache_OverwritesDriftedCache(t *testing.T) {
 
 func TestRefreshBalanceCache_SumsAcrossBatches(t *testing.T) {
 	pool := mustPool(t)
+	lockBalanceTests(t, pool)
 	merchantID := insertActiveMerchant(t, pool)
 
 	insertClosedBatchWithLine(t, pool, merchantID, "2026-06-11", 15000, 1)

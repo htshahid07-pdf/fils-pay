@@ -12,6 +12,7 @@ import (
 // captures), the cached balance must equal the ledger — same as the CLI.
 func TestRefreshBalanceCache_UsesLedgerNotSchemeLines(t *testing.T) {
 	pool := mustPool(t)
+	lockBalanceTests(t, pool)
 	ctx := context.Background()
 	merchantID := insertActiveMerchant(t, pool)
 

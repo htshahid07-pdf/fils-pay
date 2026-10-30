@@ -7,7 +7,7 @@
  * Usage: DATABASE_URL=postgres://... npx tsx db/seed/index.ts
  */
 import { Pool } from "pg";
-import { generate } from "./generate.js";
+import { generate, issuedSeedKeys } from "./generate.js";
 import { buildAssertions, runAssertions } from "./selfVerify.js";
 
 async function main(): Promise<void> {
@@ -53,6 +53,13 @@ async function main(): Promise<void> {
       process.exitCode = 1;
     } else {
       console.log("\nseed: all REAL assertions passed");
+    }
+
+    // Printed last, from the final generate() run: these are the keys that
+    // work. Dev/test convenience only (raw keys are never stored).
+    console.log("");
+    for (const key of issuedSeedKeys) {
+      console.log(`seed: API key for ${key.merchant}: ${key.rawKey}`);
     }
   } finally {
     await pool.end();

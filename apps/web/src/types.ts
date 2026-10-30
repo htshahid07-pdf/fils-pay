@@ -222,6 +222,10 @@ export interface SettlementBatchDto {
   status: SettlementBatchStatus;
   grossFils: number;
   feeFils: number;
+  /** FP-212: refunds deducted from this batch. Absent from an older API. */
+  refundedFils?: number;
+  /** FP-212: MDR given back on those refunds. */
+  feeReversedFils?: number;
   netPayoutFils: number;
   closedAt: string | null;
   paidAt: string | null;

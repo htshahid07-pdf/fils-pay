@@ -47,6 +47,15 @@ export const SEED_USER_PASSWORD = "FilsPaySeed!2026";
 export const SEED_ADMIN_PASSWORD = "FilsPayAdminSeed!2026";
 
 /**
+ * The API keys issued by the most recent generate() run. index.ts prints
+ * them AFTER the self-verify assertions, because the "seed-deterministic"
+ * assertion runs generate() a second time, which reissues every key and
+ * invalidates the first set. Printing inside generate() showed 16 keys for
+ * 8 merchants, and the first 8 answered 401.
+ */
+export const issuedSeedKeys: { merchant: string; rawKey: string }[] = [];
+
+/**
  * One fixture admin per role, so the three-way role boundary
  * (`support` < `finance` < `super_admin`) can actually be exercised by hand:
  * logging in as `support@filspay.test` and hitting a finance-gated route is
@@ -893,6 +902,7 @@ export async function generate(pool: Pool): Promise<SeedSummary> {
   // (recordKycReview opens its own transaction via the pool).
   let kycReviewCount = 0;
   let apiKeyCount = 0;
+  issuedSeedKeys.length = 0;
   for (const merchant of insertedMerchants) {
     await recordKycReview(pool, {
       merchantId: merchant.merchantId,
@@ -909,8 +919,9 @@ export async function generate(pool: Pool): Promise<SeedSummary> {
     });
     apiKeyCount += 1;
     // Dev/test convenience only: the raw key is never stored, so this is
-    // the only place it's ever visible. Fine to print for seed data.
-    console.log(`seed: issued API key for ${merchant.displayName}: ${issued.rawKey}`);
+    // the only place it's ever visible. Kept for index.ts to print once the
+    // run that wins (the last one) is known.
+    issuedSeedKeys.push({ merchant: merchant.displayName, rawKey: issued.rawKey });
   }
 
   return {

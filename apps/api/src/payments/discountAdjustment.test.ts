@@ -61,11 +61,13 @@ async function adjustmentLegs(transactionId: string): Promise<Array<{ account_id
   return result.rows;
 }
 
-/** Fee first, then discount: 602 fils @ 275 bps = 17 fils fee; 12.5% of 17 rounds to 2. */
-test("posts a rebate leg pair sized by the discount applied to the fee already charged", async () => {
-  // 602 fils captured at 275bps MDR charges 17 fils; a 1250bps negotiated
-  // discount rebates bankersRoundDiv(17*1250, 10000) = 2 fils, leaving the
-  // merchant charged 15 fils net.
+/** Settlement's order (discount off the amount, then MDR): 602 fils @ 275 bps = 17 fils charged; the net fee is 14, so the rebate is 3. */
+test("posts a rebate leg pair that brings the fee down to settlement's discounted fee", async () => {
+  // 602 fils captured at 275bps MDR charges 17 fils. Settlement charges MDR
+  // on the discounted amount: 602 - 75 = 527 fils, 527 * 2.75% = 14 fils
+  // (TestComputeSettlementFee pins the same 14). The rebate is 17 - 14 = 3.
+  // It used to be 12.5% of the fee (2 fils, net 15), so ledger and payout
+  // disagreed by a fil.
   const { merchantId, transactionId } = await seedCapturedTransaction({
     mdrBps: 275,
     discountBps: 1250,
@@ -77,8 +79,8 @@ test("posts a rebate leg pair sized by the discount applied to the fee already c
 
   const legs = await adjustmentLegs(transactionId);
   assert.deepEqual(legs, [
-    { account_id: "merchant_payable", direction: "credit", amount_fils: "2" },
-    { account_id: "platform_fee_revenue", direction: "debit", amount_fils: "2" },
+    { account_id: "merchant_payable", direction: "credit", amount_fils: "3" },
+    { account_id: "platform_fee_revenue", direction: "debit", amount_fils: "3" },
   ]);
 });
 
@@ -96,7 +98,8 @@ test("a merchant with no negotiated discount produces no rows at all", async () 
 });
 
 test("a fee that rounds the discount down to zero posts nothing", async () => {
-  // 7 fils of fee at 100bps rebates bankersRoundDiv(700, 10000) = 0 fils —
+  // 250 fils @ 275bps charges 7 fils. With a 1% discount, settlement charges
+  // MDR on 250 - 2 = 248 fils, which is still 7 fils, so the rebate is 0 —
   // ledger_entries has a CHECK (amount_fils > 0), so no leg is written.
   const { merchantId, transactionId } = await seedCapturedTransaction({
     mdrBps: 275,

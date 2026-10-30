@@ -1,5 +1,5 @@
 import type { Pool } from "pg";
-import { estimateFeeFils } from "../fees/estimate.js";
+import { applyRateFils, subtractFils, toFils } from "@filspay/money";
 
 const DEFAULT_LIMIT = 25;
 const MAX_LIMIT = 100;
@@ -318,10 +318,33 @@ export async function getReconciliationReport(
     // selected, so after any refund the ledger moved (-amount + fee
     // reversed on merchant_payable) with nothing on this side to explain
     // it, and the gap stopped being zero.
-    pool.query<{ event_type: string; amount_fils: string | number; fee_reversed_fils: string | null }>(
-      `SELECT te.event_type, te.amount_fils, te.metadata->>'feeReversedFils' AS fee_reversed_fils
+    // Captures carry what they actually cost the merchant: the fee capture.ts
+    // RECORDED on the event (metadata.feeFils) minus the negotiated-discount
+    // rebate posted for that event (the first adjustment at or after it,
+    // which is how applyCaptureDiscountAdjustment writes one per capture).
+    pool.query<{
+      event_type: string;
+      amount_fils: string | number;
+      fee_reversed_fils: string | null;
+      fee_fils: string | null;
+      discount_fils: string | number;
+    }>(
+      `SELECT te.event_type, te.amount_fils,
+              te.metadata->>'feeReversedFils' AS fee_reversed_fils,
+              te.metadata->>'feeFils'         AS fee_fils,
+              COALESCE(disc.amount_fils, 0)   AS discount_fils
          FROM transaction_events te
          JOIN transactions t ON t.id = te.transaction_id
+         LEFT JOIN LATERAL (
+           SELECT le.amount_fils
+             FROM ledger_entries le
+            WHERE le.transaction_id = te.transaction_id
+              AND le.account_id = 'merchant_payable' AND le.direction = 'credit'
+              AND le.description = 'capture: negotiated discount adjustment'
+              AND le.occurred_at >= te.occurred_at
+            ORDER BY le.occurred_at, le.id
+            LIMIT 1
+         ) disc ON te.event_type IN ('captured', 'partially_captured')
         WHERE t.merchant_id = $1
           AND te.event_type IN ('captured', 'partially_captured', 'refunded', 'refund_partial')
           AND te.settlement_batch_id IS NULL
@@ -334,8 +357,9 @@ export async function getReconciliationReport(
     ),
   ]);
 
-  // MK: merchants.mdr_bps is kept in sync with the current fee_schedules row by the 0046 trigger,
-  // so reading it here is the same as resolving the schedule
+  // merchants.mdr_bps is NOT kept in sync with fee_schedules: no "0046
+  // trigger" exists (Alpha: 250 here, 225 in force). It is only a fallback
+  // for capture events that carry no recorded fee.
   const merchant = merchantResult.rows[0];
   const mdrBps = merchant?.mdr_bps ?? 0;
   const discountBps = merchant?.negotiated_discount_bps ?? 0;
@@ -350,7 +374,15 @@ export async function getReconciliationReport(
       pendingUnbatchedFils += amountFils + Number(row.fee_reversed_fils ?? 0);
       continue;
     }
-    const feeFils = estimateFeeFils(amountFils, mdrBps, discountBps);
+    // The fee the ledger actually holds for this capture. It was estimated
+    // from merchants.mdr_bps with float maths, so a merchant on a newer fee
+    // schedule never tied out (Alpha: 15 fils off on one 6.000 BD capture).
+    // Legacy events with no recorded fee fall back to settlement's integer
+    // formula: MDR on the discounted amount (ComputeSettlementFee).
+    const feeFils =
+      row.fee_fils !== null
+        ? Number(row.fee_fils) - Number(row.discount_fils)
+        : applyRateFils(subtractFils(toFils(amountFils), applyRateFils(toFils(amountFils), discountBps)), mdrBps);
     pendingUnbatchedFils += amountFils - feeFils;
   }
 
