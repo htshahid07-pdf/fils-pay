@@ -1,0 +1,18 @@
+import { chromium } from "playwright";
+import fs from "node:fs";
+const mid = fs.readFileSync("/tmp/alpha.mid", "utf8").trim();
+const b = await chromium.launch(); const p = await b.newPage({ viewport: { width: 1300, height: 800 } }); const errs = [];
+p.on("pageerror", (e) => errs.push(e.message));
+await p.goto("http://localhost:5173/dashboard/login");
+const i = p.locator("form input"); await i.nth(0).fill(mid); await i.nth(1).fill("owner@alpharetail.example"); await i.nth(2).fill("FilsPaySeed!2026");
+await p.locator("form button[type=submit]").click();
+const code = await p.locator("code").first().textContent({ timeout: 10000 });
+await p.locator("form input").first().fill(code.trim()); await p.locator("form button[type=submit]").click();
+await p.waitForURL(/dashboard/, { timeout: 10000 });
+await p.goto("http://localhost:5173/dashboard/settlement"); await p.waitForTimeout(2000);
+console.log("headers:", (await p.locator("table thead th").allInnerTexts()).join(" | "));
+console.log("first row:", (await p.locator("table tbody tr").first().locator("td").allInnerTexts()).join(" | "));
+await p.screenshot({ path: "/mnt/user-data/outputs/ui/5-settlement-refund-columns.png" });
+await p.locator("table tbody tr").first().locator("a").click(); await p.waitForTimeout(1500);
+console.log("detail:", (await p.locator("dl").first().innerText()).replace(/\n/g, " ").slice(0, 220));
+console.log("crashes:", errs.length ? errs : "none"); await b.close();
